@@ -1,99 +1,18 @@
-const express  = require('express');
-const fetch    = require('node-fetch');
-const FormData = require('form-data');
-const cors     = require('cors');
-const Jimp     = require('jimp');
+const express = require('express');
+const fetch = require('node-fetch');
+const cors = require('cors');
 
-const app  = express();
+const app = express();
 const jobs = {};
 
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// ── IMG2IMG ───────────────────────────────────────────────────
-// Lanza generación y responde jobId inmediatamente
-app.post('/img2img', async (req, res) => {
-  const { imageUrl, prompt, stabilityKey, strength } = req.body;
-  if (!imageUrl || !prompt || !stabilityKey) {
-    return res.status(400).json({ error: 'Faltan parámetros' });
-  }
-
-  const jobId = 'job_' + Date.now();
-  jobs[jobId] = { status: 'processing' };
-  res.json({ ok: true, jobId });
-
-  (async () => {
-    try {
-      const imgRes    = await fetch(imageUrl);
-      const imgBuffer = await imgRes.buffer();
-      const image = await Jimp.read(imgBuffer);
-      image.cover(1024, 1024);
-      const resizedBuffer = await image.getBufferAsync(Jimp.MIME_PNG);
-
-      const promptFinal = prompt +
-        ", placed on white marble surface, warm golden sunset lighting, " +
-        "dramatic side light, luxury jewelry photography, editorial style, " +
-        "shallow depth of field, 85mm lens, highly detailed, " +
-        "full jewelry piece visible not cropped, 3/4 front view, " +
-        "small object centered with negative space around it";
-
-      const negativePrompt =
-        "blurry, low quality, distorted, ugly, text, watermark, " +
-        "dark background, flat lighting, person, hand, cropped, cut off";
-
-      const form = new FormData();
-      form.append('init_image',              resizedBuffer, { filename: 'reference.png', contentType: 'image/png' });
-      form.append('init_image_mode',         'IMAGE_STRENGTH');
-      form.append('image_strength',          String(strength || 0.35));
-      form.append('text_prompts[0][text]',   promptFinal);
-      form.append('text_prompts[0][weight]', '1');
-      form.append('text_prompts[1][text]',   negativePrompt);
-      form.append('text_prompts[1][weight]', '-1');
-      form.append('cfg_scale',               '10');
-      form.append('steps',                   '30');
-      form.append('samples',                 '1');
-
-      const stabRes = await fetch(
-        'https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/image-to-image',
-        {
-          method:  'POST',
-          headers: { ...form.getHeaders(), Authorization: 'Bearer ' + stabilityKey, Accept: 'application/json' },
-          body: form
-        }
-      );
-
-      if (!stabRes.ok) {
-        const errText = await stabRes.text();
-        console.error('Stability img2img error:', errText);
-        jobs[jobId] = { status: 'error', error: errText };
-        return;
-      }
-
-      const data = await stabRes.json();
-      if (!data.artifacts || !data.artifacts.length) {
-        jobs[jobId] = { status: 'error', error: 'Sin imagen de Stability' };
-        return;
-      }
-
-      console.log('img2img completado:', jobId);
-      jobs[jobId] = { status: 'done', base64: data.artifacts[0].base64 };
-      setTimeout(() => { delete jobs[jobId]; }, 10 * 60 * 1000);
-
-    } catch(e) {
-      console.error('img2img error:', e.message);
-      jobs[jobId] = { status: 'error', error: e.message };
-    }
-  })();
-});
-
-// ── TXT2IMG ───────────────────────────────────────────────────
-// Nuevo endpoint: igual que img2img pero para texto-a-imagen.
-// Responde jobId inmediatamente y procesa en background,
-// evitando el timeout de 14s de Wix/Velo.
 app.post('/txt2img', async (req, res) => {
   const { prompt, ambienteSuffix, negativePrompt, stabilityKey, variacion } = req.body;
+
   if (!prompt || !stabilityKey) {
-    return res.status(400).json({ error: 'Faltan parámetros' });
+    return res.status(400).json({ ok: false, error: 'Faltan parámetros' });
   }
 
   const jobId = 'job_' + Date.now() + '_' + (variacion || '0');
@@ -102,38 +21,35 @@ app.post('/txt2img', async (req, res) => {
 
   (async () => {
     try {
-      // El sufijo de ambiente viene del backend de Velo (ya diferenciado por variación)
-      const promptFinal = prompt + (ambienteSuffix || '');
+      const promptFinal = `${prompt}\n${ambienteSuffix || ''}`;
 
-      const negative = negativePrompt ||
-        "blurry, low quality, distorted, deformed, ugly, text, watermark, logo, " +
-        "person, hand, finger, body part, face, skin, " +
-        "dark muddy background, flat lighting, oversaturated, cartoon, illustration, painting, " +
-        "abstract, surreal, fantasy, unrealistic proportions, " +
-        "cropped jewelry, partial view, cut off, multiple pieces, duplicate, " +
-        "broken metal, melted, warped, " +
-        "cheap looking, plastic, toy jewelry, costume jewelry";
+      console.log('=== TXT2IMG JOB ===', jobId);
+      console.log(promptFinal);
+
+      const negative =
+        negativePrompt ||
+        "blurry, low quality, distorted, deformed, ugly, text, watermark, logo, person, hand, finger, body part, face, skin, cropped jewelry, partial view, cut off, duplicate, broken metal, melted metal, warped geometry, impossible jewelry structure, unreadable design, malformed charms, random letters, wrong lettering, messy chain, cheap plastic toy jewelry, cartoon, illustration, painting, fantasy";
 
       const body = JSON.stringify({
         text_prompts: [
-          { text: promptFinal, weight: 1   },
-          { text: negative,    weight: -1  }
+          { text: promptFinal, weight: 1.25 },
+          { text: negative, weight: -1 }
         ],
-        cfg_scale: 8,
-        height:    1024,
-        width:     1024,
-        steps:     35,
-        samples:   1
+        cfg_scale: 12,
+        height: 1024,
+        width: 1024,
+        steps: 45,
+        samples: 1
       });
 
       const stabRes = await fetch(
         'https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/text-to-image',
         {
-          method:  'POST',
+          method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            Authorization:  'Bearer ' + stabilityKey,
-            Accept:         'application/json'
+            Authorization: 'Bearer ' + stabilityKey,
+            Accept: 'application/json'
           },
           body
         }
@@ -147,30 +63,46 @@ app.post('/txt2img', async (req, res) => {
       }
 
       const data = await stabRes.json();
+
       if (!data.artifacts || !data.artifacts.length) {
         jobs[jobId] = { status: 'error', error: 'Sin imagen de Stability' };
         return;
       }
 
-      console.log('txt2img completado:', jobId);
-      jobs[jobId] = { status: 'done', base64: data.artifacts[0].base64 };
-      setTimeout(() => { delete jobs[jobId]; }, 10 * 60 * 1000);
+      jobs[jobId] = {
+        status: 'done',
+        base64: data.artifacts[0].base64
+      };
 
-    } catch(e) {
+      setTimeout(() => {
+        delete jobs[jobId];
+      }, 10 * 60 * 1000);
+
+    } catch (e) {
       console.error('txt2img error:', e.message);
       jobs[jobId] = { status: 'error', error: e.message };
     }
   })();
 });
 
-// ── CONSULTAR RESULTADO (compartido por img2img y txt2img) ────
+// Desactivado a propósito.
+// Para este proyecto NO usamos img2img porque copia demasiado la referencia.
+app.post('/img2img', async (req, res) => {
+  return res.status(400).json({
+    ok: false,
+    error: 'img2img desactivado. Este flujo usa solo txt2img para respetar los cambios del cliente.'
+  });
+});
+
 app.get('/img2img-result/:jobId', (req, res) => {
   const job = jobs[req.params.jobId];
   if (!job) return res.json({ status: 'not_found' });
   res.json(job);
 });
 
-app.get('/health', (req, res) => res.json({ ok: true }));
+app.get('/health', (req, res) => {
+  res.json({ ok: true });
+});
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log('Servidor en puerto', PORT));
