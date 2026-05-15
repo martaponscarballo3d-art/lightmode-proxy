@@ -11,14 +11,17 @@ app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
 // ── IMG2IMG ───────────────────────────────────────────────────
-// Lanza generación y responde jobId inmediatamente
+// Lanza generación y responde jobId inmediatamente.
+// FIX: ahora usa negativePrompt recibido del backend (no hardcodeado),
+// para que el prompt negativo sea coherente con el brief del cliente.
 app.post('/img2img', async (req, res) => {
-  const { imageUrl, prompt, stabilityKey, strength } = req.body;
+  const { imageUrl, prompt, negativePrompt, stabilityKey, strength, variacion } = req.body;
+
   if (!imageUrl || !prompt || !stabilityKey) {
     return res.status(400).json({ error: 'Faltan parámetros' });
   }
 
-  const jobId = 'job_' + Date.now();
+  const jobId = 'job_' + Date.now() + '_' + (variacion || '0');
   jobs[jobId] = { status: 'processing' };
   res.json({ ok: true, jobId });
 
@@ -30,6 +33,8 @@ app.post('/img2img', async (req, res) => {
       image.cover(1024, 1024);
       const resizedBuffer = await image.getBufferAsync(Jimp.MIME_PNG);
 
+      // El promptFinal viene completo del backend (incluye ambiente y policy).
+      // Solo añadimos el sufijo fotográfico de producto aquí.
       const promptFinal = prompt +
         ", placed on white marble surface, warm golden sunset lighting, " +
         "dramatic side light, luxury jewelry photography, editorial style, " +
@@ -37,7 +42,9 @@ app.post('/img2img', async (req, res) => {
         "full jewelry piece visible not cropped, 3/4 front view, " +
         "small object centered with negative space around it";
 
-      const negativePrompt =
+      // FIX: usar el negativePrompt recibido del backend si existe,
+      // si no, usar el fallback básico.
+      const negative = negativePrompt ||
         "blurry, low quality, distorted, ugly, text, watermark, " +
         "dark background, flat lighting, person, hand, cropped, cut off";
 
@@ -47,10 +54,10 @@ app.post('/img2img', async (req, res) => {
       form.append('image_strength',          String(strength || 0.35));
       form.append('text_prompts[0][text]',   promptFinal);
       form.append('text_prompts[0][weight]', '1');
-      form.append('text_prompts[1][text]',   negativePrompt);
+      form.append('text_prompts[1][text]',   negative);
       form.append('text_prompts[1][weight]', '-1');
       form.append('cfg_scale',               '10');
-      form.append('steps',                   '30');
+      form.append('steps',                   '35');
       form.append('samples',                 '1');
 
       const stabRes = await fetch(
@@ -70,6 +77,7 @@ app.post('/img2img', async (req, res) => {
       }
 
       const data = await stabRes.json();
+
       if (!data.artifacts || !data.artifacts.length) {
         jobs[jobId] = { status: 'error', error: 'Sin imagen de Stability' };
         return;
@@ -79,7 +87,7 @@ app.post('/img2img', async (req, res) => {
       jobs[jobId] = { status: 'done', base64: data.artifacts[0].base64 };
       setTimeout(() => { delete jobs[jobId]; }, 10 * 60 * 1000);
 
-    } catch(e) {
+    } catch (e) {
       console.error('img2img error:', e.message);
       jobs[jobId] = { status: 'error', error: e.message };
     }
@@ -87,11 +95,11 @@ app.post('/img2img', async (req, res) => {
 });
 
 // ── TXT2IMG ───────────────────────────────────────────────────
-// Nuevo endpoint: igual que img2img pero para texto-a-imagen.
 // Responde jobId inmediatamente y procesa en background,
 // evitando el timeout de 14s de Wix/Velo.
 app.post('/txt2img', async (req, res) => {
   const { prompt, ambienteSuffix, negativePrompt, stabilityKey, variacion } = req.body;
+
   if (!prompt || !stabilityKey) {
     return res.status(400).json({ error: 'Faltan parámetros' });
   }
@@ -102,7 +110,6 @@ app.post('/txt2img', async (req, res) => {
 
   (async () => {
     try {
-      // El sufijo de ambiente viene del backend de Velo (ya diferenciado por variación)
       const promptFinal = prompt + (ambienteSuffix || '');
 
       const negative = negativePrompt ||
@@ -116,8 +123,8 @@ app.post('/txt2img', async (req, res) => {
 
       const body = JSON.stringify({
         text_prompts: [
-          { text: promptFinal, weight: 1   },
-          { text: negative,    weight: -1  }
+          { text: promptFinal, weight:  1 },
+          { text: negative,    weight: -1 }
         ],
         cfg_scale: 8,
         height:    1024,
@@ -147,6 +154,7 @@ app.post('/txt2img', async (req, res) => {
       }
 
       const data = await stabRes.json();
+
       if (!data.artifacts || !data.artifacts.length) {
         jobs[jobId] = { status: 'error', error: 'Sin imagen de Stability' };
         return;
@@ -156,7 +164,7 @@ app.post('/txt2img', async (req, res) => {
       jobs[jobId] = { status: 'done', base64: data.artifacts[0].base64 };
       setTimeout(() => { delete jobs[jobId]; }, 10 * 60 * 1000);
 
-    } catch(e) {
+    } catch (e) {
       console.error('txt2img error:', e.message);
       jobs[jobId] = { status: 'error', error: e.message };
     }
